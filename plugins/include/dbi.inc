@@ -181,6 +181,19 @@ methodmap DBResultSet < Handle
 	// @error              No current result set.
 	public native bool Rewind();
 
+	// Fetches a blob from a field in the current row of a result set.  
+	// If the result is NULL, an empty blob will be returned.  A NULL 
+	// check can be done with the result parameter, or SQL_IsFieldNull().
+	// 
+	// @param field        The field index (starting from 0).
+	// @param buffer       Binary buffer.
+	// @param maxlength    Maximum size of the binary buffer.
+	// @param result       Optional variable to store the status of the return value.
+	// @return             Number of bytes written.
+	// @error              Invalid field index, invalid type conversion requested
+	//                     from the database, or no current result set.
+	public native int FetchBlob(int field, char[] buffer, int maxlength, DBResult &result=DBVal_Error);
+
 	// Fetches a string from a field in the current row of a result set.  
 	// If the result is NULL, an empty string will be returned.  A NULL 
 	// check can be done with the result parameter, or SQL_IsFieldNull().
@@ -314,6 +327,19 @@ methodmap DBStatement < Handle
 	//                      can be set to false for optimization.
 	// @error               Invalid parameter index, or SQL error.
 	public native void BindString(int param, const char[] value, bool copy);
+
+	// Binds a parameter in a prepared statement to a given blob value.
+	// 
+	// @param param         The parameter index (starting from 0).
+	// @param value         The binary data to bind.
+	// @param length        The size of the binary data to bind. Can be left
+	//                      at its default value if copy is false.
+	// @param copy          Whether or not SourceMod should copy the value
+	//                      locally if necessary.  If the binary contents
+	//                      won't change before calling SQL_Execute(), this
+	//                      can be set to false for optimization.
+	// @error               Invalid parameter index, or SQL error.
+	public native void BindBlob(int param, const char[] value, int length=0, bool copy);
 };
 
 /**
@@ -825,6 +851,23 @@ native bool SQL_MoreRows(Handle query);
 native bool SQL_Rewind(Handle query);
 
 /**
+ * Fetches a blob from a field in the current row of a result set.  
+ * If the result is NULL, an empty blob will be returned.  A NULL 
+ * check can be done with the result parameter, or SQL_IsFieldNull().
+ * 
+ * @param query         A query (or statement) Handle.
+ * @param field         The field index (starting from 0).
+ * @param buffer        Binary buffer.
+ * @param maxlength     Maximum size of the binary buffer.
+ * @param result        Optional variable to store the status of the return value.
+ * @return              Number of bytes written.
+ * @error               Invalid query Handle or field index, invalid
+ *                      type conversion requested from the database,
+ *                      or no current result set.
+ */
+native int SQL_FetchBlob(Handle query, int field, char[] buffer, int maxlength, DBResult &result=DBVal_Error);
+
+/**
  * Fetches a string from a field in the current row of a result set.  
  * If the result is NULL, an empty string will be returned.  A NULL 
  * check can be done with the result parameter, or SQL_IsFieldNull().
@@ -935,6 +978,20 @@ native void SQL_BindParamFloat(Handle statement, int param, float value);
  *                      SQL error.
  */
 native void SQL_BindParamString(Handle statement, int param, const char[] value, bool copy);
+
+// Binds a parameter in a prepared statement to a given blob value.
+//
+// @param statement     A statement (prepared query) Handle. 
+// @param param         The parameter index (starting from 0).
+// @param value         The binary data to bind.
+// @param length        The size of the binary data to bind. Can be left
+//                      at its default value of copy is false.
+// @param copy          Whether or not SourceMod should copy the value
+//                      locally if necessary.  If the binary contents
+//                      won't change before calling SQL_Execute(), this
+//                      can be set to false for optimization.
+// @error               Invalid parameter index, or SQL error.
+native void SQL_BindParamBlob(Handle statement, int param, const char[] value, int length=0, bool copy);
 
 /**
  * Executes a prepared statement.  All parameters must be bound beforehand.

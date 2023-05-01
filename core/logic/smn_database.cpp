@@ -1120,6 +1120,49 @@ static cell_t SQL_Rewind(IPluginContext *pContext, const cell_t *params)
 	return rs->Rewind() ? 1 : 0;
 }
 
+static cell_t SQL_FetchBlob(IPluginContext *pContext, const cell_t *params)
+{
+	IQuery *query;
+	HandleError err;
+
+	if ((err = ReadQueryHndl(params[1], pContext, &query)) != HandleError_None)
+	{
+		return pContext->ThrowNativeError("Invalid query Handle %x (error: %d)", params[1], err);
+	}
+
+	IResultSet *rs = query->GetResultSet();
+	if (!rs)
+	{
+		return pContext->ThrowNativeError("No current result set");
+	}
+
+	IResultRow *row = rs->CurrentRow();
+	if (!row)
+	{
+		return pContext->ThrowNativeError("Current result set has no fetched rows");
+	}
+
+	const void *data;
+	size_t length;
+	
+	DBResult res = row->GetBlob(params[2], &data, &length);
+
+	if (res == DBVal_Error)
+	{
+		return pContext->ThrowNativeError("Error fetching data from field %d", params[2]);
+	} else if (res == DBVal_TypeMismatch) {
+		return pContext->ThrowNativeError("Could not fetch data in field %d as a blob", params[2]);
+	}
+
+	pContext->PhysAddrToLocal(params[3], params[4], data, &length);
+
+	cell_t *addr;
+	pContext->LocalToPhysAddr(params[5], &addr);
+	*addr = (cell_t)res;
+
+	return (cell_t)length;
+}
+
 static cell_t SQL_FetchString(IPluginContext *pContext, const cell_t *params)
 {
 	IQuery *query;
@@ -1352,6 +1395,30 @@ static cell_t SQL_BindParamString(IPluginContext *pContext, const cell_t *params
 	if (!stmt->BindParamString(params[2], str, params[4] ? true : false))
 	{
 		return pContext->ThrowNativeError("Could not bind parameter %d as a string", params[2]);
+	}
+
+	return 1;
+}
+
+static cell_t SQL_BindParamBlob(IPluginContext *pContext, const cell_t *params)
+{
+	IPreparedQuery *stmt;
+	HandleError err;
+
+	if ((err = ReadStmtHndl(params[1], pContext, &stmt)) != HandleError_None)
+	{
+		return pContext->ThrowNativeError("Invalid statement Handle %x (error: %d)", params[1], err);
+	}
+
+	// Reading the binary data as a string, or rather char array is fine here,
+	// as LocalToString only calculates the pointer position
+	// No further handling, like for the string terminator, is done
+	char *data;
+	pContext->LocalToString(params[3], &data);
+
+	if (!stmt->BindParamBlob(params[2], data, params[4], params[5] ? true : false))
+	{
+		return pContext->ThrowNativeError("Could not bind parameter %d as a blob", params[2]);
 	}
 
 	return 1;
@@ -1838,6 +1905,7 @@ REGISTER_NATIVES(dbNatives)
 	{"DBResultSet.FetchRow",            SQL_FetchRow},
 	{"DBResultSet.MoreRows.get",		SQL_MoreRows},
 	{"DBResultSet.Rewind",				SQL_Rewind},
+	{"DBResultSet.FetchBlob",			SQL_FetchBlob},
 	{"DBResultSet.FetchString",			SQL_FetchString},
 	{"DBResultSet.FetchFloat",			SQL_FetchFloat},
 	{"DBResultSet.FetchInt",			SQL_FetchInt},
@@ -1850,6 +1918,7 @@ REGISTER_NATIVES(dbNatives)
 	{"DBStatement.BindInt",				SQL_BindParamInt},
 	{"DBStatement.BindFloat",			SQL_BindParamFloat},
 	{"DBStatement.BindString",			SQL_BindParamString},
+	{"DBStatement.BindBlob",			SQL_BindParamBlob},
 
 	{"Database.Connect",				Database_Connect},
 	{"Database.Driver.get",				Database_Driver_get},
@@ -1865,6 +1934,7 @@ REGISTER_NATIVES(dbNatives)
 	{"SQL_BindParamInt",		SQL_BindParamInt},
 	{"SQL_BindParamFloat",		SQL_BindParamFloat},
 	{"SQL_BindParamString",		SQL_BindParamString},
+	{"SQL_BindParamBlob",		SQL_BindParamBlob},
 	{"SQL_CheckConfig",			SQL_CheckConfig},
 	{"SQL_Connect",				SQL_Connect},
 	{"SQL_ConnectEx",			SQL_ConnectEx},
@@ -1877,6 +1947,7 @@ REGISTER_NATIVES(dbNatives)
 	{"SQL_FetchMoreResults",	SQL_FetchMoreResults},
 	{"SQL_FetchRow",			SQL_FetchRow},
 	{"SQL_FetchSize",			SQL_FetchSize},
+	{"SQL_FetchBlob",			SQL_FetchBlob},
 	{"SQL_FetchString",			SQL_FetchString},
 	{"SQL_FieldNameToNum",		SQL_FieldNameToNum},
 	{"SQL_FieldNumToName",		SQL_FieldNumToName},
