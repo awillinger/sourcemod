@@ -48,14 +48,59 @@ PgStatement::PgStatement(PgDatabase *db, const char* stmtName)
 
 	m_Params = (unsigned int)PQnparams(desc);
 
+	AllocateBindBuffers();
+	
+	m_Results = false;
+}
+
+PgStatement::PgStatement(PgStatement& other)
+{
+	// Copy base data
+	m_pgsql = other.m_pgsql;
+
+	m_pParent = ke::RefPtr<PgDatabase>(other.m_pParent);
+	// Should be fine to copy the pointer itself directly, as this does 
+	// not change
+	m_stmtName = other.m_stmtName;
+
+	m_Params = other.m_Params;
+
+	AllocateBindBuffers();
+
+	// Copy parameter bindings
 	if (m_Params)
 	{
-		m_pushinfo = (ParamBind *)malloc(sizeof(ParamBind) * m_Params);
-		memset(m_pushinfo, 0, sizeof(ParamBind) * m_Params);
-	} else {
-		m_pushinfo = NULL;
+		memcpy(m_pushinfo, other.m_pushinfo, sizeof(ParamBind) * m_Params);
+
+		for (unsigned int i = 0; i < m_Params; i++)
+		{
+			const DBType dbType = m_pushinfo[i].type;
+
+			// Update pointers in pointy types (like blob, string) so they point
+			// to independent data
+			if (dbType != DBType_String && dbType != DBType_Blob)
+			{
+				continue;
+			}
+
+			const void *original_ptr = other.m_pushinfo[i].blob;
+			if (!original_ptr)
+			{
+				continue;
+			}
+
+			// If the original binding was done using a copy, we also have to
+			// copy the ... copy over
+			const size_t length = other.m_pushinfo[i].length;
+
+			void *copy_ptr = malloc(length);
+			memcpy(copy_ptr, original_ptr, length);
+
+			m_pushinfo[i].blob = copy_ptr;
+		}
 	}
 
+	// This must also be initialized here to avoid garbage data
 	m_Results = false;
 }
 
@@ -66,11 +111,12 @@ PgStatement::~PgStatement()
 	{
 		if (m_rs->m_pRes != NULL)
 			PQclear(m_rs->m_pRes);
+		
 		delete m_rs;
 	}
 
 	/* Free old blobs */
-	for (unsigned int i=0; i<m_Params; i++)
+	for (unsigned int i = 0; i < m_Params; i++)
 	{
 		free(m_pushinfo[i].blob);
 	}
@@ -82,6 +128,17 @@ PgStatement::~PgStatement()
 void PgStatement::Destroy()
 {
 	delete this;
+}
+
+void PgStatement::AllocateBindBuffers()
+{
+	if (m_Params)
+	{
+		m_pushinfo = (ParamBind *)malloc(sizeof(ParamBind) * m_Params);
+		memset(m_pushinfo, 0, sizeof(ParamBind) * m_Params);
+	} else {
+		m_pushinfo = NULL;
+	}
 }
 
 bool PgStatement::FetchMoreResults()
@@ -202,6 +259,11 @@ bool PgStatement::BindParamNull(unsigned int param)
 	return true;
 }
 
+IPreparedQuery *PgStatement::Clone()
+{
+	return new PgStatement(*this);
+}
+
 bool PgStatement::Execute()
 {
 	/* Clear any past result first! */
@@ -313,6 +375,11 @@ bool PgStatement::Execute()
 	m_Results = true;
 
 	return true;
+}
+
+IDatabase *PgStatement::GetDatabase()
+{
+	return m_pParent;
 }
 
 const char *PgStatement::GetError(int *errCode/* =NULL */)

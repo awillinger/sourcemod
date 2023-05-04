@@ -51,6 +51,7 @@ class PgStatement : public IPreparedQuery
 {
 public:
 	PgStatement(PgDatabase *db, const char* stmtName);
+	PgStatement(PgStatement& other);
 	~PgStatement();
 public: //IQuery
 	IResultSet *GetResultSet();
@@ -62,11 +63,15 @@ public: //IPreparedQuery
 	bool BindParamNull(unsigned int param);
 	bool BindParamString(unsigned int param, const char *text, bool copy);
 	bool BindParamBlob(unsigned int param, const void *data, size_t length, bool copy);
+	IPreparedQuery *Clone();
 	bool Execute();
+	IDatabase *GetDatabase();
 	const char *GetError(int *errCode=NULL);
 	unsigned int GetAffectedRows();
 	unsigned int GetInsertID();
 private:
+	void AllocateBindBuffers();
+
 	void *CopyBlob(unsigned int param, const void *blobptr, size_t length);
 private:
 	PGconn *m_pgsql;

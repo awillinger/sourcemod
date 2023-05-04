@@ -185,16 +185,15 @@ inline HandleError ReadDbOrStmtHndl(Handle_t hndl, IPluginContext *pContext, IDa
 	return err;
 }
 
-class TQueryOp : public IDBThreadOperation
+class BaseTQueryOp : public IDBThreadOperation
 {
 public:
-	TQueryOp(IDatabase *db, IPluginFunction *pf, const char *query, cell_t data) : 
-	  m_pDatabase(db), m_pFunction(pf), m_Query(query), m_Data(data),
-	  me(scripts->FindPluginByContext(pf->GetParentContext()->GetContext())),
-	  m_pQuery(NULL)
+	BaseTQueryOp(IDatabase *db, IPluginFunction *pf, cell_t data) :
+	  m_pDatabase(db), m_pQuery(NULL), m_pFunction(pf), m_Data(data),
+	  me(scripts->FindPluginByContext(pf->GetParentContext()->GetContext()))
 	{
 		/* We always increase the reference count because this is potentially
-		 * asynchronous.  Otherwise the original handle could be closed while 
+		 * asynchronous.  Otherwise the original handle could be closed while
 		 * we're still latched onto it.
 		 */
 		m_pDatabase->IncReferenceCount();
@@ -202,7 +201,8 @@ public:
 		HandleSecurity sec(me->GetIdentity(), g_pCoreIdent);
 		m_MyHandle = CreateLocalHandle(g_DBMan.GetDatabaseType(), m_pDatabase, &sec);
 	}
-	~TQueryOp()
+
+	~BaseTQueryOp()
 	{
 		if (m_pQuery)
 		{
@@ -219,24 +219,29 @@ public:
 			m_pDatabase->Close();
 		}
 	}
+
 	IdentityToken_t *GetOwner()
 	{
 		return me->GetIdentity();
 	}
+
 	IDBDriver *GetDriver()
 	{
 		return m_pDatabase->GetDriver();
 	}
+
 	void RunThreadPart()
 	{
 		m_pDatabase->LockForFullAtomicOperation();
-		m_pQuery = m_pDatabase->DoQuery(m_Query.c_str());
-		if (!m_pQuery)
+
+		if (!Execute())
 		{
 			g_pSM->Format(error, sizeof(error), "%s", m_pDatabase->GetError());
 		}
+
 		m_pDatabase->UnlockFromFullAtomicOperation();
 	}
+
 	void CancelThinkPart()
 	{
 		if (!m_pFunction->IsRunnable())
@@ -248,6 +253,7 @@ public:
 		m_pFunction->PushCell(m_Data);
 		m_pFunction->Execute(NULL);
 	}
+
 	void RunThinkPart()
 	{
 		/* Create a Handle for our query */
@@ -283,19 +289,77 @@ public:
 			handlesys->FreeHandle(qh, &sec);
 		}
 	}
+
 	void Destroy()
 	{
 		delete this;
 	}
-private:
+protected:
+	virtual bool Execute() =0;
+
 	IDatabase *m_pDatabase;
-	IPluginFunction *m_pFunction;
-	String m_Query;
-	cell_t m_Data;
-	IPlugin *me;
 	IQuery *m_pQuery;
+private:
+	IPluginFunction *m_pFunction;
+	cell_t m_Data;
+
+	IPlugin *me;
+	
 	char error[255];
 	Handle_t m_MyHandle;
+};
+
+class TQueryOp : public BaseTQueryOp
+{
+public:
+	TQueryOp(IDatabase *db, IPluginFunction *pf, const char *query, cell_t data) : 
+	  BaseTQueryOp(db, pf, data), m_Query(query)
+	{}
+protected:
+	bool Execute()
+	{
+		m_pQuery = m_pDatabase->DoQuery(m_Query.c_str());
+		
+		return m_pQuery;
+	}
+private:
+	String m_Query;
+};
+
+class TExecuteOp : public BaseTQueryOp
+{
+public:
+	TExecuteOp(IDatabase *db, IPreparedQuery *query, IPluginFunction *pf, cell_t data) : 
+	  BaseTQueryOp(db, pf, data)
+	{
+		// As queries are executed in the separate thread using a queue, we
+		// must clone the statement instance here so that any parameter bindings
+		// are not modified until the instance is executed
+		// Otherwise, it may entirely be possible that new values are bound by
+		// a plugin before this instance had a chance to be executed with the
+		// original ones
+		// This may happen if, for example, another large query is present
+		// before us in the queue
+		m_pQuery = query->Clone();
+	}
+protected:
+	bool Execute()
+	{
+		// Execute the prepared statement as usual
+		bool result = static_cast<IPreparedQuery *>(m_pQuery)->Execute();
+
+		if (!result)
+		{
+			// Directly destroy the query on failure so that the forward is
+			// fired with an error state
+			m_pQuery->Destroy();
+
+			// Also reset the pointer so that no double delete occurs
+			m_pQuery = nullptr;
+		}
+
+		return result;
+	}
 };
 
 enum AsyncCallbackMode {
@@ -1437,6 +1501,61 @@ static cell_t SQL_Execute(IPluginContext *pContext, const cell_t *params)
 	return stmt->Execute() ? 1 : 0;
 }
 
+static cell_t SQL_TExecute(IPluginContext *pContext, const cell_t *params)
+{
+	IPreparedQuery *stmt = NULL;
+	HandleError err;
+
+	if ((err = ReadStmtHndl(params[1], pContext, &stmt)) != HandleError_None)
+	{
+		return pContext->ThrowNativeError("Invalid statement Handle %x (error: %d)", params[1], err);
+	}
+
+	IDatabase *db = stmt->GetDatabase();
+	
+	IDBDriver *driver = db->GetDriver();
+
+	if (!driver->IsThreadSafe())
+	{
+		return pContext->ThrowNativeError("Driver \"%s\" is not thread safe!", driver->GetIdentifier());
+	}
+
+	if (!driver->SupportsPreparedQueryThreading())
+	{
+		return pContext->ThrowNativeError("Driver \"%s\" does not support threaded prepared statements!", driver->GetIdentifier());
+	}
+
+	IPluginFunction *pf = pContext->GetFunctionById(params[2]);
+	if (!pf)
+	{
+		return pContext->ThrowNativeError("Function id %x is invalid", params[2]);
+	}
+
+	cell_t data = params[3];
+
+	PrioQueueLevel level = PrioQueue_Normal;
+	if (params[4] == (cell_t)PrioQueue_High)
+	{
+		level = PrioQueue_High;
+	} else if (params[4] == (cell_t)PrioQueue_Low) {
+		level = PrioQueue_Low;
+	}
+
+	IPlugin *pPlugin = scripts->FindPluginByContext(pContext->GetContext());
+
+	TExecuteOp *op = new TExecuteOp(db, stmt, pf, data);
+	if (pPlugin->GetProperty("DisallowDBThreads", NULL)
+		|| !g_DBMan.AddToThreadQueue(op, level))
+	{
+		/* Do everything right now */
+		op->RunThreadPart();
+		op->RunThinkPart();
+		op->Destroy();
+	}
+
+	return 1;
+}
+
 static cell_t SQL_IsSameConnection(IPluginContext *pContext, const cell_t *params)
 {
 	IDatabase *db1=NULL, *db2=NULL;
@@ -1919,6 +2038,7 @@ REGISTER_NATIVES(dbNatives)
 	{"DBStatement.BindFloat",			SQL_BindParamFloat},
 	{"DBStatement.BindString",			SQL_BindParamString},
 	{"DBStatement.BindBlob",			SQL_BindParamBlob},
+	{"DBStatement.Execute",				SQL_TExecute},
 
 	{"Database.Connect",				Database_Connect},
 	{"Database.Driver.get",				Database_Driver_get},
@@ -1970,6 +2090,7 @@ REGISTER_NATIVES(dbNatives)
 	{"SQL_ReadDriver",			SQL_ReadDriver},
 	{"SQL_Rewind",				SQL_Rewind},
 	{"SQL_TConnect",			SQL_TConnect},
+	{"SQL_TExecute",			SQL_TExecute},
 	{"SQL_TQuery",				SQL_TQuery},
 	{"SQL_UnlockDatabase",		SQL_UnlockDatabase},
 	{"SQL_ConnectCustom",		SQL_ConnectCustom},

@@ -68,6 +68,10 @@ public:
 	bool IsThreadSafe();
 	bool InitializeThreadSafety();
 	void ShutdownThreadSafety();
+	bool SupportsPreparedQueryThreading()
+	{
+		return false;
+	}
 public:
 	void RemovePersistent(IDatabase *pdb);
 private:

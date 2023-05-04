@@ -340,6 +340,22 @@ methodmap DBStatement < Handle
 	//                      can be set to false for optimization.
 	// @error               Invalid parameter index, or SQL error.
 	public native void BindBlob(int param, const char[] value, int length=0, bool copy);
+
+	// Executes a prepared statement via a thread. The result handle is passed
+	// through the callback. All parameters must be bound beforehand.
+	//
+	// The database handle returned through the callback is always a new Handle,
+	// and if necessary, IsSameConnection() should be used to test against other
+	// connections.
+	//
+	// The result handle returned through the callback is temporary and destroyed 
+	// at the end of the callback.
+	//
+	// @param callback       Callback.
+	// @param data           Extra data value to pass to the callback.
+	// @param prio           Priority queue to use.
+	public native void Execute(SQLQueryCallback callback, any data = 0,
+	                         DBPriority prio = DBPrio_Normal);
 };
 
 /**
@@ -1001,6 +1017,24 @@ native void SQL_BindParamBlob(Handle statement, int param, const char[] value, i
  * @error               Invalid statement Handle.
  */
 native bool SQL_Execute(Handle statement);
+
+// Executes a prepared statement via a thread. The result handle is passed
+// through the callback. All parameters must be bound beforehand.
+//
+// The database handle returned through the callback is always a new Handle,
+// and if necessary, IsSameConnection() should be used to test against other
+// connections.
+//
+// The result handle returned through the callback is temporary and destroyed 
+// at the end of the callback.
+//
+// @param statement      A statement (prepared query) Handle.
+// @param callback       Callback; database is in "owner" and the query Handle
+//                       is passed in "hndl".
+// @param data           Extra data value to pass to the callback.
+// @param prio           Priority queue to use.
+// @error               Invalid statement Handle.
+native void SQL_TExecute(Handle statement, SQLQueryCallback callback, any data = 0, DBPriority prio = DBPrio_Normal);
 
 /**
  * Locks a database so threading operations will not interrupt.

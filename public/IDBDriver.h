@@ -35,6 +35,7 @@
 #include <IShareSys.h>
 #include <IHandleSys.h>
 #include <string.h>
+#include <stdlib.h>
 
 /**
  * @file IDBDriver.h
@@ -327,6 +328,8 @@ namespace SourceMod
 		virtual void Destroy() =0;
 	};
 
+	class IDatabase;
+
 	class IPreparedQuery : public IQuery
 	{
 	public:
@@ -385,6 +388,18 @@ namespace SourceMod
 									const void *data, 
 									size_t length, 
 									bool copy) =0;
+		
+		/**
+		 * @brief Copies the query with all currently bound parameters to a new
+		 * instance that can be executed in a separate thread.
+		 * 
+		 * Please note that the new instance still shares the same connection
+		 * and underlying statement pointer, so it is only truly independent
+		 * regarding its parameter bindings.
+		 * 
+		 * @return				A pointer to the new instance.
+		 */
+		virtual IPreparedQuery *Clone() =0;
 
 		/**
 		 * @brief Executes the query with the currently bound parameters.
@@ -392,6 +407,14 @@ namespace SourceMod
 		 * @return				True on success, false otherwise.
 		 */
 		virtual bool Execute() =0;
+
+		/**
+		 * @brief Returns a pointer to the database connection this prepared
+		 * statement is bound to.
+		 *
+		 * @return				An IDatabase pointer. Can never be null.
+		 */
+		virtual IDatabase *GetDatabase() =0;
 
 		/**
 		 * @brief Returns the last error message from this statement.
@@ -718,6 +741,20 @@ namespace SourceMod
 		 * @brief Shuts down thread safety for the calling thread.
 		 */
 		virtual void ShutdownThreadSafety() =0;
+
+		/**
+		 * @brief Returns whether the driver is supports executing prepared
+		 * statements in a separate thread.
+		 * 
+		 * This is an extension to IsThreadSafe meaning that a driver must also
+		 * be threadsafe to support threaded prepared statement execution.
+		 *
+		 * @return				True if supported, false otherwise.
+		 */
+		virtual bool SupportsPreparedQueryThreading()
+		{
+			return true;
+		}
 	};
 
 	/**

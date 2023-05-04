@@ -35,6 +35,8 @@
 #include "MyDatabase.h"
 #include "MyBoundResults.h"
 
+#include <memory>
+
 struct ParamBind
 {
 	union
@@ -50,6 +52,7 @@ class MyStatement : public IPreparedQuery
 {
 public:
 	MyStatement(MyDatabase *db, MYSQL_STMT *stmt);
+	MyStatement(MyStatement& other);
 	~MyStatement();
 public: //IQuery
 	IResultSet *GetResultSet();
@@ -61,17 +64,21 @@ public: //IPreparedQuery
 	bool BindParamNull(unsigned int param);
 	bool BindParamString(unsigned int param, const char *text, bool copy);
 	bool BindParamBlob(unsigned int param, const void *data, size_t length, bool copy);
+	IPreparedQuery *Clone();
 	bool Execute();
+	IDatabase *GetDatabase();
 	const char *GetError(int *errCode=NULL);
 	unsigned int GetAffectedRows();
 	unsigned int GetInsertID();
 private:
+	void AllocateBindBuffers();
+
 	void *CopyBlob(unsigned int param, const void *blobptr, size_t length);
 	void ClearResults();
 private:
 	MYSQL *m_mysql;
 	ke::RefPtr<MyDatabase> m_pParent;
-	MYSQL_STMT *m_stmt;
+	std::shared_ptr<MYSQL_STMT> m_pStmt;
 	MYSQL_BIND *m_bind;
 	MYSQL_RES *m_pRes;
 	ParamBind *m_pushinfo;

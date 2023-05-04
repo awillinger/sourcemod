@@ -33,21 +33,78 @@
 #include "MyBoundResults.h"
 
 MyStatement::MyStatement(MyDatabase *db, MYSQL_STMT *stmt)
-: m_mysql(db->m_mysql), m_pParent(db), m_stmt(stmt), m_pRes(NULL), m_rs(NULL), m_Results(false)
+: m_mysql(db->m_mysql), m_pParent(db), m_pRes(NULL), m_rs(NULL), m_Results(false)
 {
-	m_Params = (unsigned int)mysql_stmt_param_count(m_stmt);
+	// Cannot use the initializer list for this, as we need a custom deleter
+	m_pStmt = std::shared_ptr<MYSQL_STMT>(stmt, [](MYSQL_STMT *stmt){
+		mysql_stmt_close(stmt);
+	});
 
+	m_Params = (unsigned int)mysql_stmt_param_count(m_pStmt.get());
+
+	AllocateBindBuffers();
+
+	m_Results = false;
+}
+
+MyStatement::MyStatement(MyStatement& other)
+{
+	// Copy base data
+	m_mysql = other.m_mysql;
+
+	m_pParent = ke::RefPtr<MyDatabase>(other.m_pParent);
+	m_pStmt = other.m_pStmt;
+
+	m_Params = other.m_Params;
+
+	AllocateBindBuffers();
+
+	// Copy parameter bindings
 	if (m_Params)
 	{
-		m_pushinfo = (ParamBind *)malloc(sizeof(ParamBind) * m_Params);
-		memset(m_pushinfo, 0, sizeof(ParamBind) * m_Params);
-		m_bind = (MYSQL_BIND *)malloc(sizeof(MYSQL_BIND) * m_Params);
-		memset(m_bind, 0, sizeof(MYSQL_BIND) * m_Params);
-	} else {
-		m_pushinfo = NULL;
-		m_bind = NULL;
+		// Copy raw binding structs over
+		memcpy(m_bind, other.m_bind, sizeof(MYSQL_BIND) * m_Params);
+		memcpy(m_pushinfo, other.m_pushinfo, sizeof(ParamBind) * m_Params);
+
+		for (unsigned int i = 0; i < m_Params; i++)
+		{
+			const enum_field_types buffer_type = m_bind[i].buffer_type;
+
+			// Update pointers so they point to the copied pushinfo structs
+			switch (buffer_type)
+			{
+				case MYSQL_TYPE_LONG:
+					m_bind[i].buffer = &(m_pushinfo[i].data.ival);
+					break;
+				case MYSQL_TYPE_FLOAT:
+					m_bind[i].buffer = &(m_pushinfo[i].data.fval);
+					break;
+				case MYSQL_TYPE_STRING:
+				case MYSQL_TYPE_BLOB:
+				{
+					const void *original_ptr = other.m_pushinfo[i].blob;
+					if (original_ptr != NULL)
+					{
+						// If the original binding was done using a copy, we
+						// also have to copy the ... copy over
+						// Otherwise, the original pointer can stay as-is
+						const size_t length = other.m_pushinfo[i].length;
+
+						void *copy_ptr = malloc(length);
+						memcpy(copy_ptr, original_ptr, length);
+
+						m_pushinfo[i].blob = copy_ptr;
+					}
+
+					m_bind[i].length = &(m_bind[i].buffer_length);
+
+					break;
+				}
+			}
+		}
 	}
 
+	// This must also be initialized here to avoid garbage data
 	m_Results = false;
 }
 
@@ -62,7 +119,7 @@ MyStatement::~MyStatement()
 	ClearResults();
 
 	/* Free old blobs */
-	for (unsigned int i=0; i<m_Params; i++)
+	for (unsigned int i = 0; i < m_Params; i++)
 	{
 		free(m_pushinfo[i].blob);
 	}
@@ -70,14 +127,28 @@ MyStatement::~MyStatement()
 	/* Free our allocated arrays */
 	free(m_pushinfo);
 	free(m_bind);
-	
-	/* Close our mysql handles */
-	mysql_stmt_close(m_stmt);
+
+	/* The statement pointer will automatically be closed by the shared_ptr */
 }
 
 void MyStatement::Destroy()
 {
 	delete this;
+}
+
+void MyStatement::AllocateBindBuffers()
+{
+	if (m_Params)
+	{
+		m_pushinfo = (ParamBind *)malloc(sizeof(ParamBind) * m_Params);
+		memset(m_pushinfo, 0, sizeof(ParamBind) * m_Params);
+
+		m_bind = (MYSQL_BIND *)malloc(sizeof(MYSQL_BIND) * m_Params);
+		memset(m_bind, 0, sizeof(MYSQL_BIND) * m_Params);
+	} else {
+		m_pushinfo = NULL;
+		m_bind = NULL;
+	}
 }
 
 void MyStatement::ClearResults()
@@ -87,11 +158,13 @@ void MyStatement::ClearResults()
 		delete m_rs;
 		m_rs = NULL;
 	}
+
 	if (m_pRes)
 	{
 		mysql_free_result(m_pRes);
 		m_pRes = NULL;
 	}
+
 	m_Results = false;
 }
 
@@ -107,7 +180,9 @@ bool MyStatement::FetchMoreResults()
 
 	ClearResults();
 
-	if (mysql_stmt_next_result(m_stmt) != 0)
+	MYSQL_STMT *stmt = m_pStmt.get();
+
+	if (mysql_stmt_next_result(stmt) != 0)
 	{
 		return false;
 	}
@@ -115,14 +190,14 @@ bool MyStatement::FetchMoreResults()
 	/* the column count is > 0 if there is a result set
 	 * 0 if the result is only the final status packet in CALL queries.
 	 */
-	unsigned int num_fields = mysql_stmt_field_count(m_stmt);
+	unsigned int num_fields = mysql_stmt_field_count(stmt);
 	if (num_fields == 0)
 	{
 		return false;
 	}
 
 	/* Skip away if we don't have data */
-	m_pRes = mysql_stmt_result_metadata(m_stmt);
+	m_pRes = mysql_stmt_result_metadata(stmt);
 	if (!m_pRes)
 	{
 		return false;
@@ -131,7 +206,7 @@ bool MyStatement::FetchMoreResults()
 	/* If we don't have a result manager, create one. */
 	if (!m_rs)
 	{
-		m_rs = new MyBoundResults(m_stmt, m_pRes, num_fields);
+		m_rs = new MyBoundResults(stmt, m_pRes, num_fields);
 	}
 
 	/* Tell the result set to update its bind info,
@@ -143,7 +218,7 @@ bool MyStatement::FetchMoreResults()
 	}
 
 	/* Try precaching the results. */
-	m_Results = (mysql_stmt_store_result(m_stmt) == 0);
+	m_Results = (mysql_stmt_store_result(stmt) == 0);
 
 	/* Update now that the data is known. */
 	m_rs->Update();
@@ -272,6 +347,11 @@ bool MyStatement::BindParamNull(unsigned int param)
 	return true;
 }
 
+IPreparedQuery *MyStatement::Clone()
+{
+	return new MyStatement(*this);
+}
+
 bool MyStatement::Execute()
 {
 	/* Clear any past result first! */
@@ -283,16 +363,18 @@ bool MyStatement::Execute()
 	/* Free result set structures */
 	ClearResults();
 
+	MYSQL_STMT *stmt = m_pStmt.get();
+
 	/* Bind the parameters */
 	if (m_Params)
 	{
-		if (mysql_stmt_bind_param(m_stmt, m_bind) != 0)
+		if (mysql_stmt_bind_param(stmt, m_bind) != 0)
 		{
 			return false;
 		}
 	}
 
-	if (mysql_stmt_execute(m_stmt) != 0)
+	if (mysql_stmt_execute(stmt) != 0)
 	{
 		return false;
 	}
@@ -300,21 +382,21 @@ bool MyStatement::Execute()
 	/* the column count is > 0 if there is a result set
 	 * 0 if the result is only the final status packet in CALL queries.
 	 */
-	unsigned int num_fields = mysql_stmt_field_count(m_stmt);
+	unsigned int num_fields = mysql_stmt_field_count(stmt);
 	if (num_fields == 0)
 	{
 		return true;
 	}
 
 	/* Skip away if we don't have data */
-	m_pRes = mysql_stmt_result_metadata(m_stmt);
+	m_pRes = mysql_stmt_result_metadata(stmt);
 	if (!m_pRes)
 	{
 		return true;
 	}
 
 	/* Create our result manager. */
-	m_rs = new MyBoundResults(m_stmt, m_pRes, num_fields);
+	m_rs = new MyBoundResults(stmt, m_pRes, num_fields);
 
 	/* Tell the result set to update its bind info,
 	 * and initialize itself if necessary.
@@ -325,7 +407,7 @@ bool MyStatement::Execute()
 	}
 
 	/* Try precaching the results. */
-	m_Results = (mysql_stmt_store_result(m_stmt) == 0);
+	m_Results = (mysql_stmt_store_result(stmt) == 0);
 
 	/* Update now that the data is known. */
 	m_rs->Update();
@@ -334,24 +416,31 @@ bool MyStatement::Execute()
 	return m_Results;
 }
 
+IDatabase *MyStatement::GetDatabase()
+{
+	return m_pParent.get();
+}
+
 const char *MyStatement::GetError(int *errCode/* =NULL */)
 {
+	MYSQL_STMT *stmt = m_pStmt.get();
+
 	if (errCode)
 	{
-		*errCode = mysql_stmt_errno(m_stmt);
+		*errCode = mysql_stmt_errno(stmt);
 	}
 
-	return mysql_stmt_error(m_stmt);
+	return mysql_stmt_error(stmt);
 }
 
 unsigned int MyStatement::GetAffectedRows()
 {
-	return (unsigned int)mysql_stmt_affected_rows(m_stmt);
+	return (unsigned int)mysql_stmt_affected_rows(m_pStmt.get());
 }
 
 unsigned int MyStatement::GetInsertID()
 {
-	return (unsigned int)mysql_stmt_insert_id(m_stmt);
+	return (unsigned int)mysql_stmt_insert_id(m_pStmt.get());
 }
 
 IResultSet *MyStatement::GetResultSet()

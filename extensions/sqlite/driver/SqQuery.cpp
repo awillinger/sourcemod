@@ -130,6 +130,12 @@ sqlite3_stmt *SqQuery::GetStmt()
 	return m_pStmt;
 }
 
+IPreparedQuery *SqQuery::Clone()
+{
+	// Not supported
+	return this;
+}
+
 bool SqQuery::Execute()
 {
 	int rc;
@@ -181,6 +187,11 @@ bool SqQuery::Execute()
 	return (m_LastErrorCode == SQLITE_OK);
 }
 
+IDatabase *SqQuery::GetDatabase()
+{
+	return m_pParent;
+}
+
 const char *SqQuery::GetError(int *errCode/* =NULL */)
 {
 	if (errCode)
@@ -199,5 +210,3 @@ unsigned int SqQuery::GetInsertID()
 {
 	return m_InsertID;
 }
-
-
